@@ -137,8 +137,14 @@ def getDustTemperature(grid=None, ppar=None):
     """
 
     # assume tdust = tgas
+    # initialize tdust array
+    tdust = np.zeros([grid.nx, grid.ny, grid.nz, 1], dtype=np.float64)
 
-    tdust = np.zeros([grid.nx, grid.ny, grid.nz, 1], dtype=np.float64) + 1.0
+    # get gas temperature
+    t = getGasTemperature(grid=grid, ppar=ppar)
+    # I think the extra index is to distinguish multiple dust species
+    # start with one dust species for simplicity
+    tdust[:, :, :, 0] = t
     return tdust
 
 
