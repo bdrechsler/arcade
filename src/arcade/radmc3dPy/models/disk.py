@@ -39,7 +39,8 @@ except ImportError:
     print(" To use the python module of RADMC-3D you need to install Numpy")
     print(traceback.format_exc())
 
-from ..natconst import au
+from ..natconst import *
+from scipy.integrate import trapezoid
 
 
 def getModelDesc():
@@ -62,19 +63,61 @@ def getDefaultParams():
     a parameter file is written.
     """
 
+    # defpar = [
+    #     ["mstar", "1.0*ms", "Mass of the star(s)"],
+    #     ["rin", "0.1*au", "Inner disk radius"],
+    #     ["rdisk", "100*au", "Outter disk radius"],
+    #     ["rhopl", "2.37", "Density power law exponent"],
+    #     ["h0", "0.1*au", "Scale height at 1 au"],
+    #     ["hpl", "1.29", "Scale height power law exponent"],
+    #     ["t0", "315.", "Temperature at 1 au"],
+    #     ["tpl", "0.25", "Temperature power law exponent"],
+    #     ["gasspec_vturb", "1e5", "Microturbulent line width"],
+    # ]
     defpar = [
-        ["mstar", "1.0*ms", "Mass of the star(s)"],
-        ["gasspec_vturb", "1e5", "Microturbulent line width"],
+        ["xres_nlev", "3", "Number of refinement levels"],
+        ["xres_nspan", "3", "Number of the original grid cells to refine"],
+        ["xres_nstep", "3", "Number of grid cells to create in a refinement level"],
+        ["nx", "[30,100]", "Number of grid points in the first dimension"],
+        ["xbound", "[0.0*au,1.05*au, 300.0*au]", "Number of radial grid points"],
+        ["ny", "100", "Number of grid points in the first dimension"],
+        ["ybound", "[0., pi]", "Number of radial grid points"],
+        ["nz", "1", "Number of grid points in the first dimension"],
+        ["zbound", "[0., 2.0*pi]", "Number of radial grid points"],
+        ["gasspec_mol_name", "['co']", ""],
+        ["gasspec_mol_abun", "[1e-4]", ""],
+        ["gasspec_mol_dbase_type", "['leiden']", ""],
+        # ['gasspec_mol_dissoc_taulim', '[1.0]', 'Continuum optical depth limit below which all molecules dissociate'],
+        # ['gasspec_mol_freezeout_temp', '[19.0]', 'Freeze-out temperature of the molecules in Kelvin'],
+        # ['gasspec_mol_freezeout_dfact', '[1e-3]',
+        # 'Factor by which the molecular abundance should be decreased in the frezze-out zone'],
+        ["gasspec_vturb", "0.2e5", "Microturbulent line width"],
+        ["rin", "0.1*au", " Inner radius of the disk"],
+        ["rdisk", "100.0*au", " Outer radius of the disk"],
+        # ['hrdisk', '0.1', ' Ratio of the pressure scale height over radius at hrpivot'],
+        # ['hrpivot', "100.0*au", ' Reference radius at which Hp/R is taken'],
+        ["hpl", "1.29", " Flaring index"],
+        # ['plsig1', '-1.0', ' Power exponent of the surface density distribution as a function of radius'],
+        # ['sig0', '0.0', ' Surface density at rdisk'],
         [
-            "par_example1",
-            "1.0",
-            "This comment field contains the meaning of the parameter",
+            "mdisk",
+            "1e-3*ms",
+            " Mass of the disk (either sig0 or mdisk should be set to zero or commented out)",
         ],
-        [
-            "par_example2",
-            "2.0",
-            "This comment field contains the meaning of the parameter",
-        ],
+        ["t0", "315.", "Temperature at 1 au"],
+        ["tpl", "0.25", "Temperature power law exponent"],
+        ["rhopl", "2.37", "Density power law exponent"],
+        # ['bgdens', '1e-30', ' Background density (g/cm^3)'],
+        # ['srim_rout', '0.0', 'Outer boundary of the smoothing in the inner rim in terms of rin'],
+        # ['srim_plsig', '0.0', 'Power exponent of the density reduction inside of srim_rout*rin'],
+        # ['prim_rout', '0.0', 'Outer boundary of the puffed-up inner rim in terms of rin'],
+        # ['hpr_prim_rout', '0.0', 'Pressure scale height at rin'],
+        # ['gap_rin', '[0e0*au]', ' Inner radius of the gap'],
+        # ['gap_rout', '[0e0*au]', ' Outer radius of the gap'],
+        # ['gap_drfact', '[0e0]', ' Density reduction factor in the gap'],
+        # ['sigma_type', '0',
+        #  ' Surface density type (0 - polynomial, 1 - exponential outer edge (viscous self-similar solution)'],
+        ["dusttogas", "0.01", " Dust-to-gas mass ratio"],
     ]
 
     return defpar
@@ -201,7 +244,61 @@ def getGasDensity(grid=None, ppar=None):
     Returns the gas volume density in g/cm^3
     """
 
-    rhogas = np.zeros([grid.nx, grid.ny, grid.nz], dtype=np.float64) + 1e-20
+    # set up the coordinates (assume spherical)
+    r_sph, th, ph = np.meshgrid(grid.x, grid.y, grid.z, indexing="ij")
+    r_cyl = r_sph * np.sin(th)  # cylindrical radius coordinate
+    zz = r_sph * np.cos(th)  # z coordinate
+
+    # get relavant parameters
+    rin = ppar["rin"]
+    rdisk = ppar["rdisk"]
+    mdisk = ppar["mdisk"]
+    h0 = ppar["h0"]
+    hpl = ppar["hpl"]
+    gamma = ppar["rhopl"] - ppar["hpl"]
+
+    # function to calculate the surface density
+    def surface_density(r, normalize=True):
+
+        # Sigma0 = (2-gamma)*mdisk/(2*np.pi*au**(gamma)) / (rdisk**(-gamma+2) - rin**(-gamma+2))
+        Sigma0 = (2 - gamma) * mdisk / (2 * np.pi * rdisk**2)
+        Sigma = Sigma0 * (r / rdisk) ** (-gamma) * np.exp(-((r / rdisk) ** (2 - gamma)))
+
+        # set surface density of disk to 0 outside of the disk
+        Sigma[(r >= rdisk / au) ^ (r <= rin / au)] = 0e0
+
+        # deal with singularity at r==0
+        dr = r[r > 0].min()  # get the smallest (positive) value of r
+        Sigma[r == 0] = (
+            Sigma0
+            * (0.7 * dr / rdisk) ** (-gamma)
+            * np.exp(-((0.7 * dr / rdisk) ** (2 - gamma)))
+        )
+
+        if normalize:
+            r_high = np.logspace(np.log10(rin), np.logspace(rdisk), 1000)
+            Sigma_high = surface_density(r_high, normalize=False)
+
+            scale = mdisk / (2 * np.pi * trapezoid(r_high * Sigma_high, r_high))
+
+            Sigma *= scale
+
+        return Sigma
+
+    # function to calculate the scale height
+    def scale_height(r):
+        return h0 * r**hpl
+
+    # initialize density array
+    rhogas = np.zeros([grid.nx, grid.ny, grid.nz], dtype=np.float64)
+    # get surface density
+    Sigma = surface_density(r_cyl)
+    # get scale height
+    h = scale_height(r)
+    # calculate density
+    rho = Sigma / (np.sqrt(2 * np.pi) * h) * np.exp(-0.5 * (zz / h) ** 2)
+
+    rhogas[:, :, :] = rho
 
     return rhogas
 
@@ -221,9 +318,11 @@ def getDustDensity(grid=None, ppar=None):
     -------
     Returns the dust volume density in g/cm^3
     """
-
+    # get the gas density
     rhogas = getGasDensity(grid=grid, ppar=ppar)
+    # initialize the dust density grid (assume one dust species)
     rhodust = np.zeros([grid.nx, grid.ny, grid.nz, 1], dtype=np.float64)
+    # convert gas to dust density with dust to gas ratio
     rhodust[:, :, :, 0] = rhogas * ppar["dusttogas"]
     return rhodust
 
@@ -266,5 +365,20 @@ def getVelocity(grid=None, ppar=None):
     Returns the turbulent velocity in cm/s
     """
 
+    # set up the coordinates (assume spherical)
+    r_sph, th, ph = np.meshgrid(grid.x, grid.y, grid.z, indexing="ij")
+    r_cyl = r_sph * np.sin(th)  # cylindrical radius coordinate
+    zz = r_sph * np.cos(th)  # z coordinate
+
+    # get relavant parameters
+    mstar = ppar["mstar"]
+
+    # set azimuthal velocity to keplerian
+    v_kep = np.sqrt(gg * mstar * r_cyl**2 / r_sph**3)
+
+    # initialize velocity array
     vel = np.zeros([grid.nx, grid.ny, grid.nz, 3], dtype=np.float64)
+
+    # set phi velocity to keplerian velocity
+    vel[:, :, :, 2] = v_kep
     return vel
